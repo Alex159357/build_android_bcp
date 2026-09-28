@@ -28,8 +28,6 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
       ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
       ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
@@ -43,19 +41,6 @@ jobs:
       NATIVE_OVERLAY_APPLY_SCRIPT_URL: https://raw.githubusercontent.com/Alex159357/build_android_bcp/main/native_worker_overlay/ci/apply_from_url.sh
 
     steps:
-      - name: Notify Telegram - build started
-        run: |
-          set -euo pipefail
-
-          if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
-            echo "Telegram secrets are not configured; skipping notification."
-            exit 0
-          fi
-
-          curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-            --data-urlencode "text=🚀 Android build started\nProject: ${GITHUB_REPOSITORY}\nBuild type: ${BUILD_ENV}\nRun: #${GITHUB_RUN_NUMBER}\nBranch: ${GITHUB_REF_NAME}"
-
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -270,19 +255,6 @@ jobs:
             Build number: ${{ env.BUILD_NUMBER }}
           files: build/app/outputs/bundle/release/${{ env.AAB_NAME }}
 
-      - name: Notify Telegram - AAB saved to GitHub Release
-        run: |
-          set -euo pipefail
-
-          if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
-            echo "Telegram secrets are not configured; skipping notification."
-            exit 0
-          fi
-
-          curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-            --data-urlencode "text=📦 Android AAB saved to GitHub Release\nProject: ${GITHUB_REPOSITORY}\nBuild type: ${BUILD_ENV}\nArtifact: ${AAB_NAME}\nVersion: ${VERSION_NAME} (${BUILD_NUMBER})\nPackage: ${GOOGLE_PLAY_PACKAGE_NAME}\nRelease: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}\nRun: #${GITHUB_RUN_NUMBER}"
-
       - name: Print Google Play upload config
         if: ${{ inputs.upload_to_google_play }}
         run: |
@@ -315,42 +287,3 @@ jobs:
           releaseFiles: build/app/outputs/bundle/release/app-release.aab
           tracks: ${{ secrets.GOOGLE_PLAY_TRACK }}
           status: ${{ secrets.GOOGLE_PLAY_RELEASE_STATUS }}
-
-      - name: Notify Telegram - build uploaded to Google Play
-        if: ${{ inputs.upload_to_google_play }}
-        run: |
-          set -euo pipefail
-
-          if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
-            echo "Telegram secrets are not configured; skipping notification."
-            exit 0
-          fi
-
-          curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-            --data-urlencode "text=✅ Android build uploaded to Google Play\nProject: ${GITHUB_REPOSITORY}\nBuild type: ${BUILD_ENV}\nArtifact: ${AAB_NAME}\nVersion: ${VERSION_NAME} (${BUILD_NUMBER})\nTrack: ${GOOGLE_PLAY_TRACK}\nStatus: ${GOOGLE_PLAY_RELEASE_STATUS}\nRun: #${GITHUB_RUN_NUMBER}"
-
-  notify-build-failure:
-    name: Notify Telegram - build failed
-    needs: build
-    if: ${{ always() && needs.build.result == 'failure' }}
-    runs-on: ubuntu-latest
-
-    env:
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      BUILD_ENV: ${{ inputs.build_type || 'prod' }}
-
-    steps:
-      - name: Send failure notification
-        run: |
-          set -euo pipefail
-
-          if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
-            echo "Telegram secrets are not configured; skipping notification."
-            exit 0
-          fi
-
-          curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-            --data-urlencode "text=❌ Android build failed\nProject: ${GITHUB_REPOSITORY}\nBuild type: ${BUILD_ENV}\nRun: #${GITHUB_RUN_NUMBER}\nBranch: ${GITHUB_REF_NAME}\nDetails: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
