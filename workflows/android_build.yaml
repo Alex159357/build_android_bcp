@@ -26,6 +26,7 @@ jobs:
   build:
     name: Build Android AAB & Upload to Google Play
     runs-on: ubuntu-latest
+    timeout-minutes: 90
 
     env:
       ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -39,6 +40,7 @@ jobs:
       BUILD_ENV: ${{ inputs.build_type || 'prod' }}
       NATIVE_OVERLAY_URL: https://raw.githubusercontent.com/Alex159357/build_android_bcp/main/archive/native_worker_overlay.tar.gz
       NATIVE_OVERLAY_APPLY_SCRIPT_URL: https://raw.githubusercontent.com/Alex159357/build_android_bcp/main/native_worker_overlay/ci/apply_from_url.sh
+      GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.vfs.watch=false -Dorg.gradle.workers.max=2 -Dkotlin.compiler.execution.strategy=in-process
 
     steps:
       - name: Checkout
@@ -155,6 +157,40 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      - name: Configure CI Gradle settings
+        run: |
+          set -euo pipefail
+
+          cat >> android/gradle.properties <<'EOF'
+
+          # CI stability settings. GitHub hosted runners can terminate long Gradle builds
+          # with exit code 143 when daemons/file-watchers keep extra processes alive or
+          # when memory pressure is too high.
+          org.gradle.daemon=false
+          org.gradle.vfs.watch=false
+          org.gradle.parallel=false
+          org.gradle.workers.max=2
+          kotlin.compiler.execution.strategy=in-process
+          EOF
+
+          sed -i -E 's/^org\.gradle\.jvmargs=.*/org.gradle.jvmargs=-Xmx4G -XX:MaxMetaspaceSize=2G -XX:ReservedCodeCacheSize=256m -XX:+HeapDumpOnOutOfMemoryError/' android/gradle.properties
+          cat android/gradle.properties
+
+      - name: Install required Android native build tools
+        run: |
+          set -euo pipefail
+
+          set +o pipefail
+          yes | sdkmanager "cmake;3.22.1" "ninja;1.10.2" >/dev/null
+          SDKMANAGER_EXIT=${PIPESTATUS[1]}
+          set -o pipefail
+          if [[ "$SDKMANAGER_EXIT" -ne 0 ]]; then
+            echo "::error::sdkmanager failed with exit code $SDKMANAGER_EXIT"
+            exit "$SDKMANAGER_EXIT"
+          fi
+
+          sdkmanager --list_installed | grep -E 'cmake;3\.22\.1|ninja;1\.10\.2' || true
+
       - name: Validate Android release secrets
         run: |
           set -euo pipefail
@@ -223,14 +259,26 @@ jobs:
           PY
 
       - name: Build App Bundle (AAB)
+        timeout-minutes: 75
         run: |
           set -euo pipefail
 
+          flutter clean
+          flutter pub get
+          ./gradlew --stop >/dev/null 2>&1 || true
+          (while true; do echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') build still running..."; sleep 60; done) &
+          HEARTBEAT_PID=$!
+          trap 'kill "$HEARTBEAT_PID" 2>/dev/null || true; ./gradlew --stop >/dev/null 2>&1 || true' EXIT
+
           flutter build appbundle \
             --release \
+            --android-skip-build-dependency-validation \
             --build-number=${BUILD_NUMBER} \
             --build-name=${VERSION_NAME} \
             --dart-define=APP_ENV=${BUILD_ENV}
+
+          kill "$HEARTBEAT_PID" 2>/dev/null || true
+          ./gradlew --stop >/dev/null 2>&1 || true
 
           cp build/app/outputs/bundle/release/app-release.aab "build/app/outputs/bundle/release/${AAB_NAME}"
           ls -la build/app/outputs/bundle/release
