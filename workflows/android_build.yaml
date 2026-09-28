@@ -196,7 +196,7 @@ jobs:
           echo "Using sdkmanager: $SDKMANAGER"
 
           set +o pipefail
-          yes | "$SDKMANAGER" "cmake;3.22.1" "ninja;1.10.2" >/dev/null
+          yes | "$SDKMANAGER" "cmake;3.22.1" >/dev/null
           SDKMANAGER_EXIT=${PIPESTATUS[1]}
           set -o pipefail
           if [[ "$SDKMANAGER_EXIT" -ne 0 ]]; then
@@ -204,7 +204,7 @@ jobs:
             exit "$SDKMANAGER_EXIT"
           fi
 
-          "$SDKMANAGER" --list_installed | grep -E 'cmake;3\.22\.1|ninja;1\.10\.2' || true
+          "$SDKMANAGER" --list_installed | grep -E 'cmake;3\.22\.1' || true
 
       - name: Validate Android release secrets
         run: |
