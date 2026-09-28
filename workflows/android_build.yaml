@@ -17,16 +17,6 @@ name: Android CI/CD
         type: boolean
         required: true
         default: false
-      native_overlay_url:
-        description: "Public .tar.gz URL with native overlay files"
-        type: string
-        required: false
-        default: "https://raw.githubusercontent.com/Alex159357/build_android_bcp/main/archive/native_worker_overlay.tar.gz"
-      native_overlay_apply_script_url:
-        description: "Public raw URL to overlay apply_from_url.sh"
-        type: string
-        required: false
-        default: "https://raw.githubusercontent.com/Alex159357/build_android_bcp/main/native_worker_overlay/ci/apply_from_url.sh"
 
 permissions:
   contents: write
@@ -49,8 +39,8 @@ jobs:
       GOOGLE_PLAY_TRACK: ${{ secrets.GOOGLE_PLAY_TRACK }}
       GOOGLE_PLAY_RELEASE_STATUS: ${{ secrets.GOOGLE_PLAY_RELEASE_STATUS }}
       BUILD_ENV: ${{ inputs.build_type || 'prod' }}
-      NATIVE_OVERLAY_URL: ${{ inputs.native_overlay_url }}
-      NATIVE_OVERLAY_APPLY_SCRIPT_URL: ${{ inputs.native_overlay_apply_script_url }}
+      NATIVE_OVERLAY_URL: https://raw.githubusercontent.com/Alex159357/build_android_bcp/main/archive/native_worker_overlay.tar.gz
+      NATIVE_OVERLAY_APPLY_SCRIPT_URL: https://raw.githubusercontent.com/Alex159357/build_android_bcp/main/native_worker_overlay/ci/apply_from_url.sh
 
     steps:
       - name: Notify Telegram - build started
