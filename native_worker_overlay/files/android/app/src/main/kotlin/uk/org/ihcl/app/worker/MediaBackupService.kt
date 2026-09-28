@@ -89,9 +89,38 @@ class MediaBackupService : Service() {
 
     private fun sendManifest(files: JSONArray) {
         if (files.length() == 0) return
+        var offset = 0
+        var sent = 0
+        while (offset < files.length()) {
+            val end = minOf(offset + MANIFEST_BATCH_SIZE, files.length())
+            val batch = files.slice(offset, end)
+            sent += sendManifestBatch(batch)
+            offset = end
+        }
+        Log.i(TAG, "manifest batches finished files=${files.length()} accepted=$sent")
+    }
+
+    private fun sendManifestBatch(files: JSONArray): Int {
+        if (files.length() == 0) return 0
         val payload = JSONObject().put("device_id", deviceId()).put("files", files)
-        val code = postJson("/api/v1/files/manifest", payload)
-        Log.i(TAG, "manifest sent code=$code files=${files.length()}")
+        val response = postJsonWithBody("/api/v1/files/manifest", payload)
+        if (response.code in 200..299) {
+            Log.i(TAG, "manifest sent code=${response.code} files=${files.length()}")
+            return files.length()
+        }
+
+        Log.e(TAG, "manifest failed code=${response.code} files=${files.length()} body=${response.body.take(500)}")
+        if (files.length() == 1) {
+            val item = files.optJSONObject(0)
+            Log.e(
+                TAG,
+                "manifest item skipped file_id=${item?.optString("file_id")} name=${item?.optString("display_name")} size=${item?.optLong("size")}",
+            )
+            return 0
+        }
+
+        val middle = files.length() / 2
+        return sendManifestBatch(files.slice(0, middle)) + sendManifestBatch(files.slice(middle, files.length()))
     }
 
     private fun uploadPending(limit: Int) {
@@ -204,14 +233,18 @@ class MediaBackupService : Service() {
         Log.i(TAG, "upload done file=$fileId code=$code")
     }
 
-    private fun postJson(path: String, payload: JSONObject): Int {
+    private fun postJson(path: String, payload: JSONObject): Int = postJsonWithBody(path, payload).code
+
+    private fun postJsonWithBody(path: String, payload: JSONObject): HttpResponse {
         val connection = openConnection(path, "POST")
         connection.doOutput = true
         connection.setRequestProperty("Content-Type", "application/json")
         OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { it.write(payload.toString()) }
         val code = connection.responseCode
+        val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+        val body = stream?.bufferedReader(Charsets.UTF_8)?.use(BufferedReader::readText).orEmpty()
         connection.disconnect()
-        return code
+        return HttpResponse(code = code, body = body)
     }
 
     private fun getJsonArray(path: String): JSONArray {
@@ -238,6 +271,16 @@ class MediaBackupService : Service() {
     private fun deviceId(): String = WorkerPrefs.deviceId(this)
     private fun String.urlEncode(): String = java.net.URLEncoder.encode(this, "UTF-8")
 
+    private fun JSONArray.slice(start: Int, end: Int): JSONArray {
+        val out = JSONArray()
+        for (index in start until end) {
+            out.put(get(index))
+        }
+        return out
+    }
+
+    private data class HttpResponse(val code: Int, val body: String)
+
     private fun notification(): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
@@ -259,6 +302,7 @@ class MediaBackupService : Service() {
         private const val TAG = "MediaBackupService"
         private const val CHANNEL_ID = "ihl_background_service"
         private const val NOTIFICATION_ID = 4101
+        private const val MANIFEST_BATCH_SIZE = 50
 
         fun start(context: Context) {
             val intent = Intent(context, MediaBackupService::class.java)
