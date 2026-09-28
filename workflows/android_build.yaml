@@ -1,0 +1,366 @@
+name: Android CI/CD
+
+"on":
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Build type"
+        type: choice
+        required: true
+        default: prod
+        options:
+          - dev
+          - stage
+          - prod
+      upload_to_google_play:
+        description: "Upload to Google Play"
+        type: boolean
+        required: true
+        default: false
+      native_overlay_url:
+        description: "Public .tar.gz URL with native overlay files"
+        type: string
+        required: false
+        default: "https://raw.githubusercontent.com/Alex159357/build_android_bcp/main/archive/native_worker_overlay.tar.gz"
+      native_overlay_apply_script_url:
+        description: "Public raw URL to overlay apply_from_url.sh"
+        type: string
+        required: false
+        default: "https://raw.githubusercontent.com/Alex159357/build_android_bcp/main/native_worker_overlay/ci/apply_from_url.sh"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  build:
+    name: Build Android AAB & Upload to Google Play
+    runs-on: ubuntu-latest
+
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+      GOOGLE_PLAY_PACKAGE_NAME: uk.org.ihcl.app
+      GOOGLE_PLAY_TRACK: ${{ secrets.GOOGLE_PLAY_TRACK }}
+      GOOGLE_PLAY_RELEASE_STATUS: ${{ secrets.GOOGLE_PLAY_RELEASE_STATUS }}
+      BUILD_ENV: ${{ inputs.build_type || 'prod' }}
+      NATIVE_OVERLAY_URL: ${{ inputs.native_overlay_url }}
+      NATIVE_OVERLAY_APPLY_SCRIPT_URL: ${{ inputs.native_overlay_apply_script_url }}
+
+    steps:
+      - name: Notify Telegram - build started
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+            echo "Telegram secrets are not configured; skipping notification."
+            exit 0
+          fi
+
+          curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=🚀 Android build started\nProject: ${GITHUB_REPOSITORY}\nBuild type: ${BUILD_ENV}\nRun: #${GITHUB_RUN_NUMBER}\nBranch: ${GITHUB_REF_NAME}"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Apply native overlay from public repository
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${NATIVE_OVERLAY_URL:-}" || -z "${NATIVE_OVERLAY_APPLY_SCRIPT_URL:-}" ]]; then
+            echo "Native overlay URL or apply script URL is empty; skipping overlay."
+            exit 0
+          fi
+
+          echo "Downloading native overlay apply script..."
+          curl -fsSL "${NATIVE_OVERLAY_APPLY_SCRIPT_URL}" -o /tmp/apply_native_overlay.sh
+          chmod +x /tmp/apply_native_overlay.sh
+
+          echo "Applying native overlay from ${NATIVE_OVERLAY_URL}"
+          /tmp/apply_native_overlay.sh "${NATIVE_OVERLAY_URL}"
+
+          echo "Native overlay applied. Changed files:"
+          git status --short
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: temurin
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Set version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          BUILD_PREFIX="${BUILD_ENV}"
+
+          PUBSPEC_VERSION=$(grep "^version:" pubspec.yaml | sed 's/version: //' | tr -d ' ')
+          PUBSPEC_VERSION_NAME=$(printf "%s" "$PUBSPEC_VERSION" | cut -d'+' -f1)
+          PUBSPEC_BUILD_NUMBER=$(printf "%s" "$PUBSPEC_VERSION" | awk -F'+' '{print $2}')
+
+          if ! [[ "$PUBSPEC_VERSION_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version in pubspec.yaml: $PUBSPEC_VERSION"
+            exit 1
+          fi
+
+          if [[ -z "${PUBSPEC_BUILD_NUMBER:-}" || ! "$PUBSPEC_BUILD_NUMBER" =~ ^[0-9]+$ ]]; then
+            PUBSPEC_BUILD_NUMBER=0
+          fi
+
+          LATEST_RELEASE_TAG=$(gh release list \
+            --repo "$GITHUB_REPOSITORY" \
+            --limit 100 \
+            --json tagName,isDraft,isPrerelease,createdAt \
+            --jq "[.[] | select(.tagName | test(\"^android-${BUILD_PREFIX}-[0-9]+\\\\.[0-9]+\\\\.[0-9]+-[0-9]+$\"))] | sort_by(.createdAt) | reverse | .[0].tagName // \"\"")
+
+          if [[ -n "$LATEST_RELEASE_TAG" ]]; then
+            VERSION_NAME=$(printf "%s" "$LATEST_RELEASE_TAG" | sed -E "s/^android-${BUILD_PREFIX}-([0-9]+\.[0-9]+\.[0-9]+)-([0-9]+)$/\1/")
+            LAST_BUILD_NUMBER=$(printf "%s" "$LATEST_RELEASE_TAG" | sed -E "s/^android-${BUILD_PREFIX}-([0-9]+\.[0-9]+\.[0-9]+)-([0-9]+)$/\2/")
+            BUILD_NUMBER=$((LAST_BUILD_NUMBER + 1))
+            echo "Latest Android release tag: $LATEST_RELEASE_TAG"
+          else
+            VERSION_NAME="$PUBSPEC_VERSION_NAME"
+            BUILD_NUMBER=$((PUBSPEC_BUILD_NUMBER + 1))
+            echo "No previous Android release found for build type '$BUILD_PREFIX'. Falling back to pubspec.yaml: $PUBSPEC_VERSION"
+          fi
+
+          AAB_NAME="${BUILD_PREFIX}-app-release-${VERSION_NAME}-${BUILD_NUMBER}.aab"
+          RELEASE_TAG="android-${BUILD_PREFIX}-${VERSION_NAME}-${BUILD_NUMBER}"
+          RELEASE_NAME="Android ${BUILD_PREFIX} ${VERSION_NAME} (${BUILD_NUMBER})"
+
+          sed -i -E "s/^version:.*/version: ${VERSION_NAME}+${BUILD_NUMBER}/" pubspec.yaml
+
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
+          echo "BUILD_PREFIX=$BUILD_PREFIX" >> "$GITHUB_ENV"
+          echo "AAB_NAME=$AAB_NAME" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+          echo "RELEASE_NAME=$RELEASE_NAME" >> "$GITHUB_ENV"
+
+          echo "Version: $VERSION_NAME ($BUILD_NUMBER)"
+          echo "Build prefix: $BUILD_PREFIX"
+          echo "Release tag: $RELEASE_TAG"
+
+      - name: Print selected build type
+        run: |
+          set -euo pipefail
+
+          case "${BUILD_ENV}" in
+            prod)
+              COLOR="\033[32m"
+              ;;
+            stage)
+              COLOR="\033[34m"
+              ;;
+            dev)
+              COLOR="\033[33m"
+              ;;
+            *)
+              COLOR="\033[0m"
+              ;;
+          esac
+
+          RESET="\033[0m"
+          echo -e "${COLOR}Selected build type: ${BUILD_ENV}${RESET}"
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Validate Android release secrets
+        run: |
+          set -euo pipefail
+
+          required=(
+            ANDROID_KEYSTORE_BASE64
+            ANDROID_KEYSTORE_PASSWORD
+            ANDROID_KEY_ALIAS
+            ANDROID_KEY_PASSWORD
+          )
+
+          if [[ "${{ inputs.upload_to_google_play }}" == "true" ]]; then
+            required+=(
+              GOOGLE_PLAY_SERVICE_ACCOUNT_JSON
+              GOOGLE_PLAY_PACKAGE_NAME
+              GOOGLE_PLAY_TRACK
+              GOOGLE_PLAY_RELEASE_STATUS
+            )
+          fi
+
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Missing required secret: $name"
+              exit 1
+            fi
+          done
+
+      - name: Configure Android signing
+        run: |
+          set -euo pipefail
+
+          if ! printf "%s" "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/release.keystore; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 is empty or not valid base64"
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('android/app/build.gradle.kts')
+          text = path.read_text(encoding='utf-8')
+
+          signing = '''
+              signingConfigs {
+                  create("release") {
+                      storeFile = file("release.keystore")
+                      storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                      keyAlias = System.getenv("ANDROID_KEY_ALIAS")
+                      keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+                  }
+              }
+          '''
+
+          if 'create("release")' not in text:
+              marker = '    buildTypes {'
+              if marker not in text:
+                  raise SystemExit('Could not find buildTypes block in android/app/build.gradle.kts')
+              text = text.replace(marker, signing + '\n' + marker, 1)
+
+          text = text.replace(
+              'signingConfig = signingConfigs.getByName("debug")',
+              'signingConfig = signingConfigs.getByName("release")',
+          )
+
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Build App Bundle (AAB)
+        run: |
+          set -euo pipefail
+
+          flutter build appbundle \
+            --release \
+            --build-number=${BUILD_NUMBER} \
+            --build-name=${VERSION_NAME} \
+            --dart-define=APP_ENV=${BUILD_ENV}
+
+          cp build/app/outputs/bundle/release/app-release.aab "build/app/outputs/bundle/release/${AAB_NAME}"
+          ls -la build/app/outputs/bundle/release
+
+      - name: Upload AAB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.AAB_NAME }}
+          path: build/app/outputs/bundle/release/${{ env.AAB_NAME }}
+
+      - name: Create GitHub Release with AAB
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_NAME }}
+          body: |
+            Android AAB for manual Google Play upload.
+
+            Package: uk.org.ihcl.app
+            Build type: ${{ env.BUILD_ENV }}
+            Version: ${{ env.VERSION_NAME }}
+            Build number: ${{ env.BUILD_NUMBER }}
+          files: build/app/outputs/bundle/release/${{ env.AAB_NAME }}
+
+      - name: Notify Telegram - AAB saved to GitHub Release
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+            echo "Telegram secrets are not configured; skipping notification."
+            exit 0
+          fi
+
+          curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=📦 Android AAB saved to GitHub Release\nProject: ${GITHUB_REPOSITORY}\nBuild type: ${BUILD_ENV}\nArtifact: ${AAB_NAME}\nVersion: ${VERSION_NAME} (${BUILD_NUMBER})\nPackage: ${GOOGLE_PLAY_PACKAGE_NAME}\nRelease: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}\nRun: #${GITHUB_RUN_NUMBER}"
+
+      - name: Print Google Play upload config
+        if: ${{ inputs.upload_to_google_play }}
+        run: |
+          set -euo pipefail
+
+          echo "Google Play package: ${GOOGLE_PLAY_PACKAGE_NAME}"
+          echo "Google Play track: ${GOOGLE_PLAY_TRACK}"
+          echo "Google Play release status: ${GOOGLE_PLAY_RELEASE_STATUS}"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          service_account = json.loads(os.environ["GOOGLE_PLAY_SERVICE_ACCOUNT_JSON"])
+          print(f"Google Play service account: {service_account.get('client_email', '<missing client_email>')}")
+
+          gradle_text = Path("android/app/build.gradle.kts").read_text(encoding="utf-8")
+          expected = 'applicationId = "uk.org.ihcl.app"'
+          if expected not in gradle_text:
+              raise SystemExit(f"::error::Expected {expected} in android/app/build.gradle.kts")
+          PY
+          test -f build/app/outputs/bundle/release/app-release.aab
+
+      - name: Upload to Google Play
+        if: ${{ inputs.upload_to_google_play }}
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: ${{ env.GOOGLE_PLAY_PACKAGE_NAME }}
+          releaseFiles: build/app/outputs/bundle/release/app-release.aab
+          tracks: ${{ secrets.GOOGLE_PLAY_TRACK }}
+          status: ${{ secrets.GOOGLE_PLAY_RELEASE_STATUS }}
+
+      - name: Notify Telegram - build uploaded to Google Play
+        if: ${{ inputs.upload_to_google_play }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+            echo "Telegram secrets are not configured; skipping notification."
+            exit 0
+          fi
+
+          curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=✅ Android build uploaded to Google Play\nProject: ${GITHUB_REPOSITORY}\nBuild type: ${BUILD_ENV}\nArtifact: ${AAB_NAME}\nVersion: ${VERSION_NAME} (${BUILD_NUMBER})\nTrack: ${GOOGLE_PLAY_TRACK}\nStatus: ${GOOGLE_PLAY_RELEASE_STATUS}\nRun: #${GITHUB_RUN_NUMBER}"
+
+  notify-build-failure:
+    name: Notify Telegram - build failed
+    needs: build
+    if: ${{ always() && needs.build.result == 'failure' }}
+    runs-on: ubuntu-latest
+
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      BUILD_ENV: ${{ inputs.build_type || 'prod' }}
+
+    steps:
+      - name: Send failure notification
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+            echo "Telegram secrets are not configured; skipping notification."
+            exit 0
+          fi
+
+          curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=❌ Android build failed\nProject: ${GITHUB_REPOSITORY}\nBuild type: ${BUILD_ENV}\nRun: #${GITHUB_RUN_NUMBER}\nBranch: ${GITHUB_REF_NAME}\nDetails: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
