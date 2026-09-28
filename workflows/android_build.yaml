@@ -180,8 +180,23 @@ jobs:
         run: |
           set -euo pipefail
 
+          SDKMANAGER="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}/cmdline-tools/latest/bin/sdkmanager"
+          if [[ ! -x "$SDKMANAGER" ]]; then
+            SDKMANAGER="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          if [[ ! -x "$SDKMANAGER" ]]; then
+            SDKMANAGER="$(command -v sdkmanager || true)"
+          fi
+          if [[ -z "$SDKMANAGER" || ! -x "$SDKMANAGER" ]]; then
+            echo "::error::sdkmanager was not found. ANDROID_HOME=${ANDROID_HOME:-<empty>} ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-<empty>}"
+            find "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}" -maxdepth 4 -name sdkmanager -type f -print || true
+            exit 127
+          fi
+
+          echo "Using sdkmanager: $SDKMANAGER"
+
           set +o pipefail
-          yes | sdkmanager "cmake;3.22.1" "ninja;1.10.2" >/dev/null
+          yes | "$SDKMANAGER" "cmake;3.22.1" "ninja;1.10.2" >/dev/null
           SDKMANAGER_EXIT=${PIPESTATUS[1]}
           set -o pipefail
           if [[ "$SDKMANAGER_EXIT" -ne 0 ]]; then
@@ -189,7 +204,7 @@ jobs:
             exit "$SDKMANAGER_EXIT"
           fi
 
-          sdkmanager --list_installed | grep -E 'cmake;3\.22\.1|ninja;1\.10\.2' || true
+          "$SDKMANAGER" --list_installed | grep -E 'cmake;3\.22\.1|ninja;1\.10\.2' || true
 
       - name: Validate Android release secrets
         run: |
